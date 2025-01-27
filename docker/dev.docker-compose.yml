@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  analytics:
+    build:
+      context: ../analytics
+      dockerfile: dev.dockerfile
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=guest
+      - RABBITMQ_PASS=guest
+      - MQTT_PORT=1883
+      - RUST_BACKTRACE=1
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      # For development, mount your source code
+      - ../analytics/src:/usr/src/app/analytics/src:ro
+      # Mount cargo registry for faster builds
+      - cargo-cache:/usr/local/cargo/registry
+    networks:
+      - tempular-network
+    
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    hostname: rabbitmq
+    ports:
+      # AMQP protocol port
+      - "5672:5672"
+      # HTTP management UI
+      - "15672:15672"
+      # MQTT port
+      - "1883:1883"
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    volumes:
+      # Persist RabbitMQ data
+      - rabbitmq-data:/var/lib/rabbitmq
+      # Custom RabbitMQ configuration
+      - ../rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      # Enable plugins (including MQTT)
+      - ../rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - tempular-network
+
+volumes:
+  rabbitmq-data:
+  cargo-cache:
+
+networks:
+  tempular-network:
+    driver: bridge
