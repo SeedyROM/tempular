@@ -6,6 +6,7 @@ mod logging;
 use anyhow::Result;
 use color_eyre::Report;
 use config::RabbitMQConfig;
+use tracing::info;
 
 use crate::consumer::{RabbitMQConsumer, SensorMessageHandler};
 
@@ -14,13 +15,38 @@ async fn main() -> Result<(), Report> {
     logging::setup()?;
 
     let config = RabbitMQConfig::from_env()?;
-
     let consumer = RabbitMQConsumer::new(&config).await?;
     consumer.bind_topic("sensors.#").await?;
 
-    let handler = SensorMessageHandler;
-    consumer.start_consuming(handler).await?;
+    // Create shutdown channel
+    let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+    // Clone sender for signal handling
+    let shutdown_tx_clone = shutdown_tx.clone();
+    // Setup signal handlers
+    tokio::spawn(async move {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to setup SIGTERM handler");
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .expect("Failed to setup SIGINT handler");
 
+        tokio::select! {
+            _ = sigterm.recv() => {
+                info!("SIGTERM received");
+            }
+            _ = sigint.recv() => {
+                info!("SIGINT received");
+            }
+        }
+
+        shutdown_tx_clone
+            .send(())
+            .expect("Failed to send shutdown signal");
+    });
+
+    let handler = SensorMessageHandler;
+    consumer.start_consuming(handler, shutdown_rx).await?;
+
+    info!("Application shutdown complete");
     Ok(())
 }
 

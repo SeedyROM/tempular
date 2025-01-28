@@ -1,8 +1,10 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use futures_lite::stream::StreamExt;
 use lapin::{options::*, types::FieldTable, Channel, Connection, ConnectionProperties};
-use tracing::info;
+use tracing::{error, info};
 
 use crate::{config::RabbitMQConfig, error::RabbitMQError};
 
@@ -76,7 +78,10 @@ impl RabbitMQConsumer {
     pub async fn start_consuming<H: MessageHandler>(
         &self,
         handler: H,
+        mut shutdown: tokio::sync::broadcast::Receiver<()>,
     ) -> Result<(), RabbitMQError> {
+        const MAX_RETRIES: u32 = 3;
+
         let mut consumer = self
             .channel
             .basic_consume(
@@ -92,34 +97,77 @@ impl RabbitMQConsumer {
 
         info!("Started consuming messages from queue: {}", self.queue_name);
 
-        while let Some(delivery) = consumer.next().await {
-            if let Ok(delivery) = delivery {
-                let routing_key = delivery.routing_key.as_str();
-
-                match handler.handle_message(routing_key, &delivery.data).await {
-                    Ok(_) => {
-                        // Only acknowledge if processing succeeded
-                        delivery.ack(BasicAckOptions::default()).await?;
-                    }
+        async fn handle_with_retry<H: MessageHandler>(
+            handler: &H,
+            topic: &str,
+            payload: &[u8],
+            max_retries: u32,
+        ) -> Result<(), RabbitMQError> {
+            let mut retries = 0;
+            while retries < max_retries {
+                match handler.handle_message(topic, payload).await {
+                    Ok(_) => return Ok(()),
                     Err(e) => {
-                        // Negative acknowledge on error, message will be requeued
-                        delivery
-                            .nack(BasicNackOptions {
-                                requeue: true,
-                                ..Default::default()
-                            })
-                            .await?;
-                        eprintln!("Error processing message: {}", e);
+                        retries += 1;
+                        if retries == max_retries {
+                            return Err(e);
+                        }
+                        tokio::time::sleep(Duration::from_secs(2u64.pow(retries))).await;
                     }
+                }
+            }
+            Ok(())
+        }
+
+        loop {
+            // Handle incoming messages and shutdowns
+            tokio::select! {
+                Some(delivery_result) = consumer.next() => {
+                    match delivery_result {
+                        Ok(delivery) => {
+                            let routing_key = delivery.routing_key.as_str();
+
+                            match handle_with_retry(&handler, routing_key, &delivery.data, MAX_RETRIES).await {
+                                Ok(_) => {
+                                    if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
+                                        error!("Failed to acknowledge message: {}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    if let Err(nack_err) = delivery
+                                        .nack(BasicNackOptions {
+                                            requeue: true,
+                                            ..Default::default()
+                                        })
+                                        .await
+                                    {
+                                        error!("Failed to negative acknowledge message: {}", nack_err);
+                                    }
+                                    error!("Error processing message: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Error receiving message: {}", e);
+                        }
+                    }
+                }
+                Ok(_) = shutdown.recv() => {
+                    info!("Shutdown signal received, stopping consumer");
+                    break;
+                }
+                else => {
+                    error!("Consumer channel closed unexpectedly");
+                    break;
                 }
             }
         }
 
+        info!("Consumer stopped gracefully");
         Ok(())
     }
 }
 
-// Example message handler implementation
 pub struct SensorMessageHandler;
 
 #[async_trait]
