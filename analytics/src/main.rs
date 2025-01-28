@@ -1,112 +1,64 @@
-use futures_lite::stream::StreamExt;
-use lapin::{options::*, types::FieldTable, Connection, ConnectionProperties, Result};
-use std::env;
-use tokio;
+mod config;
+mod consumer;
+mod error;
+mod logging;
+
+use anyhow::Result;
+use color_eyre::Report;
+use config::RabbitMQConfig;
+
+use crate::consumer::{RabbitMQConsumer, SensorMessageHandler};
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    // Get configuration from environment variables
-    let rabbitmq_host = env::var("RABBITMQ_HOST").unwrap_or_else(|_| "localhost".to_string());
-    let rabbitmq_port = env::var("RABBITMQ_PORT").unwrap_or_else(|_| "5672".to_string());
-    let rabbitmq_user = env::var("RABBITMQ_USER").unwrap_or_else(|_| "guest".to_string());
-    let rabbitmq_pass = env::var("RABBITMQ_PASS").unwrap_or_else(|_| "guest".to_string());
+async fn main() -> Result<(), Report> {
+    logging::setup()?;
 
-    // Connection URL
-    let addr = format!(
-        "amqp://{}:{}@{}:{}",
-        rabbitmq_user, rabbitmq_pass, rabbitmq_host, rabbitmq_port
-    );
+    let config = RabbitMQConfig::from_env()?;
 
-    // Create a connection
-    let conn = Connection::connect(&addr, ConnectionProperties::default()).await?;
-    println!("Connected to RabbitMQ");
+    let consumer = RabbitMQConsumer::new(&config).await?;
+    consumer.bind_topic("sensors.#").await?;
 
-    // Create a channel
-    let channel = conn.create_channel().await?;
-    println!("Created channel");
+    let handler = SensorMessageHandler;
+    consumer.start_consuming(handler).await?;
 
-    // The MQTT plugin creates an exchange named 'amq.topic'
-    let exchange_name = "amq.topic";
-    channel
-        .exchange_declare(
-            exchange_name,
-            lapin::ExchangeKind::Topic,
-            ExchangeDeclareOptions {
-                passive: true, // Just check if it exists
-                ..Default::default()
-            },
-            FieldTable::default(),
-        )
-        .await?;
-    println!("Successfully verified exchange: {}", exchange_name);
+    Ok(())
+}
 
-    // Create a queue with a unique name
-    let queue = channel
-        .queue_declare(
-            "", // empty string means generate a unique name
-            QueueDeclareOptions {
-                exclusive: true,
-                auto_delete: true,
-                ..Default::default()
-            },
-            FieldTable::default(),
-        )
-        .await?;
-    println!("Created queue: {}", queue.name());
+// For testing, create a mock implementation
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use consumer::MessageHandler;
+    use error::RabbitMQError;
 
-    // Bind the queue to the MQTT topics you want to subscribe to
-    // MQTT wildcards: + (single level), # (multiple levels)
-    // Example: "sensors.#" subscribes to all sensor topics
-    let routing_key = "sensors.#"; // Modify this for your MQTT topic pattern
-    channel
-        .queue_bind(
-            queue.name().as_str(),
-            exchange_name,
-            routing_key,
-            QueueBindOptions::default(),
-            FieldTable::default(),
-        )
-        .await?;
-    println!("Bound queue to topic: {}", routing_key);
+    struct MockMessageHandler {
+        messages: std::sync::Arc<tokio::sync::Mutex<Vec<(String, Vec<u8>)>>>,
+    }
 
-    // Start consuming messages
-    let mut consumer = channel
-        .basic_consume(
-            queue.name().as_str(),
-            "mqtt_consumer",
-            BasicConsumeOptions::default(),
-            FieldTable::default(),
-        )
-        .await?;
-    println!("Starting to consume MQTT messages");
-
-    while let Some(delivery) = consumer.next().await {
-        if let Ok(delivery) = delivery {
-            // Get the routing key (MQTT topic)
-            let routing_key = delivery.routing_key.as_str();
-
-            // Convert message payload to string
-            if let Ok(message) = String::from_utf8(delivery.data.clone()) {
-                println!("Received message from topic {}: {}", routing_key, message);
-
-                // Here you can add logic to handle different MQTT topics
-                match routing_key {
-                    "sensors.temperature" => {
-                        // Handle temperature data
-                        println!("Temperature reading: {}", message);
-                    }
-                    "sensors.humidity" => {
-                        // Handle humidity data
-                        println!("Humidity reading: {}", message);
-                    }
-                    _ => {}
-                }
-            }
-
-            // Acknowledge the message
-            delivery.ack(BasicAckOptions::default()).await?;
+    #[async_trait]
+    impl MessageHandler for MockMessageHandler {
+        async fn handle_message(&self, topic: &str, payload: &[u8]) -> Result<(), RabbitMQError> {
+            let mut messages = self.messages.lock().await;
+            messages.push((topic.to_string(), payload.to_vec()));
+            Ok(())
         }
     }
 
-    Ok(())
+    #[tokio::test]
+    async fn test_message_handler() {
+        let messages = std::sync::Arc::new(tokio::sync::Mutex::new(vec![]));
+        let handler = MockMessageHandler {
+            messages: messages.clone(),
+        };
+
+        handler
+            .handle_message("sensors.temperature", b"25.5")
+            .await
+            .unwrap();
+
+        let received = messages.lock().await;
+        assert_eq!(received[0].0, "sensors.temperature");
+        assert_eq!(received[0].1, b"25.5");
+    }
 }
