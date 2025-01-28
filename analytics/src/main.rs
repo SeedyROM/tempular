@@ -18,10 +18,22 @@ async fn main() -> Result<(), Report> {
     let consumer = RabbitMQConsumer::new(&config).await?;
     consumer.bind_topic("sensors.#").await?;
 
-    // Create shutdown channel
     let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
-    // Clone sender for signal handling
-    let shutdown_tx_clone = shutdown_tx.clone();
+    let (shutdown_tx_clone, shutdown_rx_dlq) = (shutdown_tx.clone(), shutdown_tx.subscribe());
+
+    // Start main consumer
+    let consumer_clone = consumer.clone();
+    let main_handle = tokio::spawn(async move {
+        let handler = SensorMessageHandler;
+        consumer_clone.start_consuming(handler, shutdown_rx).await
+    });
+
+    // Optionally start DLQ consumer
+    let dlq_handle = tokio::spawn(async move {
+        let handler = SensorMessageHandler;
+        consumer.consume_dlq(handler, shutdown_rx_dlq).await
+    });
+
     // Setup signal handlers
     tokio::spawn(async move {
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -30,12 +42,8 @@ async fn main() -> Result<(), Report> {
             .expect("Failed to setup SIGINT handler");
 
         tokio::select! {
-            _ = sigterm.recv() => {
-                info!("SIGTERM received");
-            }
-            _ = sigint.recv() => {
-                info!("SIGINT received");
-            }
+            _ = sigterm.recv() => info!("SIGTERM received"),
+            _ = sigint.recv() => info!("SIGINT received"),
         }
 
         shutdown_tx_clone
@@ -43,13 +51,12 @@ async fn main() -> Result<(), Report> {
             .expect("Failed to send shutdown signal");
     });
 
-    let handler = SensorMessageHandler;
-    consumer.start_consuming(handler, shutdown_rx).await?;
+    // Wait for both consumers to complete
+    let _ = tokio::try_join!(main_handle, dlq_handle)?;
 
     info!("Application shutdown complete");
     Ok(())
 }
-
 // For testing, create a mock implementation
 #[cfg(test)]
 mod tests {
