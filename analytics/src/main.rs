@@ -2,6 +2,7 @@ mod config;
 mod consumer;
 mod error;
 mod logging;
+mod websocket;
 
 use anyhow::Result;
 use color_eyre::Report;
@@ -19,40 +20,55 @@ async fn main() -> Result<(), Report> {
     consumer.bind_topic("sensors.#").await?;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
-    let (shutdown_tx_clone, shutdown_rx_dlq) = (shutdown_tx.clone(), shutdown_tx.subscribe());
 
     // Start main consumer
     let consumer_clone = consumer.clone();
-    let main_handle = tokio::spawn(async move {
-        let handler = SensorMessageHandler;
-        consumer_clone.start_consuming(handler, shutdown_rx).await
+    let main_handle = tokio::spawn({
+        async move {
+            let handler = SensorMessageHandler;
+            consumer_clone.start_consuming(handler, shutdown_rx).await
+        }
     });
 
     // Optionally start DLQ consumer
-    let dlq_handle = tokio::spawn(async move {
-        let handler = SensorMessageHandler;
-        consumer.consume_dlq(handler, shutdown_rx_dlq).await
+    let dlq_handle = tokio::spawn({
+        let shutdown_rx = shutdown_tx.subscribe();
+        async move {
+            let handler = SensorMessageHandler;
+            consumer.consume_dlq(handler, shutdown_rx).await
+        }
+    });
+
+    // Start WebSocket server
+    let websocket_handle = tokio::spawn({
+        let shutdown_rx = shutdown_tx.subscribe();
+        websocket::server("127.0.0.1", 8080, shutdown_rx)
     });
 
     // Setup signal handlers
-    tokio::spawn(async move {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("Failed to setup SIGTERM handler");
-        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-            .expect("Failed to setup SIGINT handler");
+    tokio::spawn({
+        let shutdown_tx = shutdown_tx.clone();
+        async move {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to setup SIGTERM handler");
+            let mut sigint =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    .expect("Failed to setup SIGINT handler");
 
-        tokio::select! {
-            _ = sigterm.recv() => info!("SIGTERM received"),
-            _ = sigint.recv() => info!("SIGINT received"),
+            tokio::select! {
+                _ = sigterm.recv() => info!("SIGTERM received"),
+                _ = sigint.recv() => info!("SIGINT received"),
+            }
+
+            shutdown_tx
+                .send(())
+                .expect("Failed to send shutdown signal");
         }
-
-        shutdown_tx_clone
-            .send(())
-            .expect("Failed to send shutdown signal");
     });
 
     // Wait for both consumers to complete
-    let _ = tokio::try_join!(main_handle, dlq_handle)?;
+    let _ = tokio::try_join!(main_handle, dlq_handle, websocket_handle)?;
 
     info!("Application shutdown complete");
     Ok(())
