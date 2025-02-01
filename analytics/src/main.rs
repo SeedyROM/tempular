@@ -1,13 +1,13 @@
+use anyhow::Result;
+use color_eyre::Report;
+use config::RabbitMQConfig;
+use tracing::info;
+
 mod config;
 mod consumer;
 mod error;
 mod logging;
 mod websocket;
-
-use anyhow::Result;
-use color_eyre::Report;
-use config::RabbitMQConfig;
-use tracing::info;
 
 use crate::consumer::{RabbitMQConsumer, SensorMessageHandler};
 
@@ -19,11 +19,12 @@ async fn main() -> Result<(), Report> {
     let consumer = RabbitMQConsumer::new(&config).await?;
     consumer.bind_topic("sensors.#").await?;
 
-    let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
 
     // Start main consumer
     let consumer_clone = consumer.clone();
     let main_handle = tokio::spawn({
+        let shutdown_rx = shutdown_tx.subscribe();
         async move {
             let handler = SensorMessageHandler;
             consumer_clone.start_consuming(handler, shutdown_rx).await
