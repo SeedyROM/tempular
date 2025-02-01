@@ -5,7 +5,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tracing::{debug, info};
 
-use crate::errors::WebSocketError;
+use crate::{config::WebSocketConfig, errors::WebSocketError, traits::FromEnv};
 
 #[derive(Debug)]
 pub struct WebSocketServer {
@@ -85,10 +85,10 @@ impl WebSocketServer {
 
 /// Starts the WebSocket server and listens for incoming connections.
 pub async fn server(
-    host: impl Into<String>,
-    port: u16,
     shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<(), WebSocketError> {
+    let WebSocketConfig { host, port } = WebSocketConfig::from_env();
+
     let server = WebSocketServer::new(host.into(), port).await?;
     server.start(shutdown_rx).await
 }

@@ -25,3 +25,9 @@ pub enum WebSocketError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
+
+#[derive(Debug, Error)]
+pub enum EnvironmentError {
+    #[error(".env file not found")]
+    DotEnvNotFound,
+}

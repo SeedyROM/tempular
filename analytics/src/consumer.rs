@@ -28,9 +28,7 @@ pub struct RabbitMQConsumer {
 
 impl RabbitMQConsumer {
     pub async fn new(config: &RabbitMQConfig) -> Result<Self, RabbitMQError> {
-        let conn =
-            Connection::connect(&config.connection_string(), ConnectionProperties::default())
-                .await?;
+        let conn = Connection::connect(&config.url(), ConnectionProperties::default()).await?;
         let channel = conn.create_channel().await?;
 
         // Declare DLX and DLQ names
