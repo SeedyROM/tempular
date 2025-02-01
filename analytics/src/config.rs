@@ -4,13 +4,7 @@ use dotenv::dotenv;
 use std::env;
 use tracing::warn;
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("DotEnv error: {0}")]
-    DotEnvError(#[from] dotenv::Error),
-    #[error("Environment variable not found: {0}")]
-    EnvVarError(#[from] std::env::VarError),
-}
+use crate::errors::ConfigError;
 
 #[derive(Debug, Clone)]
 pub struct RabbitMQConfig {
@@ -23,7 +17,7 @@ pub struct RabbitMQConfig {
 
 impl RabbitMQConfig {
     pub fn from_env() -> Result<Self, Report> {
-        dotenv().map_err(Error::DotEnvError)?;
+        dotenv().map_err(ConfigError::DotEnvError)?;
 
         Ok(Self {
             host: env::var("RABBITMQ_HOST").unwrap_or_else(|_| {

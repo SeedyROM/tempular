@@ -10,7 +10,7 @@ use lapin::{
 };
 use tracing::{error, info};
 
-use crate::{config::RabbitMQConfig, error::RabbitMQError};
+use crate::{config::RabbitMQConfig, errors::RabbitMQError};
 
 #[async_trait]
 pub trait MessageHandler {
@@ -312,7 +312,7 @@ mod tests {
     use async_trait::async_trait;
 
     use crate::consumer::MessageHandler;
-    use crate::error::RabbitMQError;
+    use crate::errors::RabbitMQError;
 
     struct MockMessageHandler {
         messages: std::sync::Arc<tokio::sync::Mutex<Vec<(String, Vec<u8>)>>>,

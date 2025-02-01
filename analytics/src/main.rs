@@ -5,8 +5,9 @@ use tracing::info;
 
 mod config;
 mod consumer;
-mod error;
+mod errors;
 mod logging;
+mod shutdown;
 mod websocket;
 
 use crate::consumer::{RabbitMQConsumer, SensorMessageHandler};
@@ -22,12 +23,12 @@ async fn main() -> Result<(), Report> {
     let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
 
     // Start main consumer
-    let consumer_clone = consumer.clone();
     let main_handle = tokio::spawn({
         let shutdown_rx = shutdown_tx.subscribe();
+        let consumer = consumer.clone();
         async move {
             let handler = SensorMessageHandler;
-            consumer_clone.start_consuming(handler, shutdown_rx).await
+            consumer.start_consuming(handler, shutdown_rx).await
         }
     });
 
@@ -49,23 +50,7 @@ async fn main() -> Result<(), Report> {
     // Setup signal handlers
     tokio::spawn({
         let shutdown_tx = shutdown_tx.clone();
-        async move {
-            let mut sigterm =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("Failed to setup SIGTERM handler");
-            let mut sigint =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-                    .expect("Failed to setup SIGINT handler");
-
-            tokio::select! {
-                _ = sigterm.recv() => info!("SIGTERM received"),
-                _ = sigint.recv() => info!("SIGINT received"),
-            }
-
-            shutdown_tx
-                .send(())
-                .expect("Failed to send shutdown signal");
-        }
+        shutdown::handle_shutdown_signals(shutdown_tx)
     });
 
     // Wait for both consumers to complete

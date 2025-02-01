@@ -5,19 +5,11 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tracing::{debug, info};
 
+use crate::errors::WebSocketError;
+
 #[derive(Debug)]
 pub struct WebSocketServer {
     tcp_listener: TcpListener,
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum WebSocketError {
-    #[error("WebSocket error: {0}")]
-    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("Handshake error")]
-    HandshakeError,
 }
 
 impl WebSocketServer {
@@ -62,7 +54,7 @@ impl WebSocketServer {
     ) -> Result<(), WebSocketError> {
         let ws_stream = tokio_tungstenite::accept_async(stream)
             .await
-            .map_err(|_| WebSocketError::HandshakeError)?;
+            .map_err(|e| WebSocketError::WebSocket(e.into()))?;
 
         info!("WebSocket connection established with {}", peer);
         // Here you can handle the WebSocket connection
