@@ -21,14 +21,16 @@ async fn main() -> Result<(), Report> {
     // Setup the application
     setup()?;
 
+    // Setup the RabbitMQ consumer
     let config = RabbitMQConfig::from_env();
     let consumer = RabbitMQConsumer::new(&config).await?;
     consumer.bind_topic("sensors.#").await?;
 
+    // Setup shutdown signals
     let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
 
     // Start main consumer
-    let main_handle = tokio::spawn({
+    let consumer_handle = tokio::spawn({
         let shutdown_rx = shutdown_tx.subscribe();
         let consumer = consumer.clone();
         async move {
@@ -59,7 +61,7 @@ async fn main() -> Result<(), Report> {
     });
 
     // Wait for both consumers to complete
-    let _ = tokio::try_join!(main_handle, dlq_handle, websocket_handle)?;
+    let _ = tokio::try_join!(consumer_handle, dlq_handle, websocket_handle)?;
 
     info!("Application shutdown complete");
     Ok(())
