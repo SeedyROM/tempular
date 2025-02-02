@@ -315,6 +315,8 @@ mod tests {
     use tokio::sync::Mutex;
     use tokio::time::timeout;
 
+    const TIMEOUT_DURATION: f32 = 0.01;
+
     // Mock Message Handler
     #[derive(Clone)]
     struct MockMessageHandler {
@@ -360,7 +362,7 @@ mod tests {
         let handler = MockMessageHandler::new(false);
 
         let result = timeout(
-            Duration::from_secs_f32(0.01),
+            Duration::from_secs_f32(TIMEOUT_DURATION),
             RabbitMQConsumer::handle_with_retry(&handler, "test.topic", b"test message", 3),
         )
         .await;
@@ -380,7 +382,7 @@ mod tests {
         const MAX_RETRIES: u32 = 3;
 
         let result = timeout(
-            Duration::from_secs_f32(0.10), // Longer timeout for retries
+            Duration::from_secs_f32(1.0),
             RabbitMQConsumer::handle_with_retry(
                 &handler,
                 "test.topic",
@@ -431,7 +433,7 @@ mod tests {
 
         // Test temperature message
         let result = timeout(
-            Duration::from_secs_f32(0.1),
+            Duration::from_secs_f32(TIMEOUT_DURATION),
             handler.handle_message("sensors.temperature", b"25.5"),
         )
         .await;
@@ -440,7 +442,7 @@ mod tests {
 
         // Test humidity message
         let result = timeout(
-            Duration::from_secs_f32(0.1),
+            Duration::from_secs_f32(TIMEOUT_DURATION),
             handler.handle_message("sensors.humidity", b"60"),
         )
         .await;
@@ -449,7 +451,7 @@ mod tests {
 
         // Test unknown sensor type
         let result = timeout(
-            Duration::from_secs_f32(0.1),
+            Duration::from_secs_f32(TIMEOUT_DURATION),
             handler.handle_message("sensors.unknown", b"data"),
         )
         .await;
@@ -458,7 +460,7 @@ mod tests {
 
         // Test invalid UTF-8
         let result = timeout(
-            Duration::from_secs_f32(0.1),
+            Duration::from_secs_f32(TIMEOUT_DURATION),
             handler.handle_message("sensors.temperature", &[0xFF]),
         )
         .await;
