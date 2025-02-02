@@ -12,7 +12,10 @@ futures-lite = "2.6.0"
 futures-util = "0.3.31"
 lapin = "2.5.0"
 thiserror = "2.0.11"
-tokio = { version = "1.43.0", features = ["full"] }
+tokio = { version = "1.43.0", features = ["full", "test-util"] }
 tokio-tungstenite = "0.26.1"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+mockall = "0.13.1"

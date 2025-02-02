@@ -9,6 +9,7 @@ mod config;
 mod consumer;
 mod errors;
 mod logging;
+mod messaging;
 mod shutdown;
 mod traits;
 mod websocket;

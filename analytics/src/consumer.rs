@@ -135,6 +135,9 @@ impl RabbitMQConsumer {
                     if retries == max_retries {
                         return Err(e);
                     }
+                    #[cfg(test)]
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    #[cfg(not(test))]
                     tokio::time::sleep(Duration::from_secs(2u64.pow(retries))).await;
                 }
             }
@@ -306,19 +309,46 @@ impl MessageHandler for SensorMessageHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use async_trait::async_trait;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Mutex;
+    use tokio::time::timeout;
 
-    use crate::consumer::MessageHandler;
-    use crate::errors::RabbitMQError;
-
+    // Mock Message Handler
+    #[derive(Clone)]
     struct MockMessageHandler {
-        messages: std::sync::Arc<tokio::sync::Mutex<Vec<(String, Vec<u8>)>>>,
+        messages: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+        should_fail: bool,
+        failure_count: Arc<Mutex<usize>>,
+    }
+
+    impl MockMessageHandler {
+        fn new(should_fail: bool) -> Self {
+            Self {
+                messages: Arc::new(Mutex::new(vec![])),
+                should_fail,
+                failure_count: Arc::new(Mutex::new(0)),
+            }
+        }
+
+        async fn get_messages(&self) -> Vec<(String, Vec<u8>)> {
+            self.messages.lock().await.clone()
+        }
+
+        async fn get_failure_count(&self) -> usize {
+            *self.failure_count.lock().await
+        }
     }
 
     #[async_trait]
     impl MessageHandler for MockMessageHandler {
         async fn handle_message(&self, topic: &str, payload: &[u8]) -> Result<(), RabbitMQError> {
+            if self.should_fail {
+                let mut count = self.failure_count.lock().await;
+                *count += 1;
+                return Err(RabbitMQError::MessageParseError("Mock failure".to_string()));
+            }
             let mut messages = self.messages.lock().await;
             messages.push((topic.to_string(), payload.to_vec()));
             Ok(())
@@ -326,19 +356,113 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_message_handler() {
-        let messages = std::sync::Arc::new(tokio::sync::Mutex::new(vec![]));
+    async fn test_handle_with_retry_success() {
+        let handler = MockMessageHandler::new(false);
+
+        let result = timeout(
+            Duration::from_secs_f32(0.01),
+            RabbitMQConsumer::handle_with_retry(&handler, "test.topic", b"test message", 3),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_ok());
+
+        let messages = handler.get_messages().await;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, "test.topic");
+        assert_eq!(messages[0].1, b"test message");
+    }
+
+    #[tokio::test]
+    async fn test_handle_with_retry_failure() {
+        let handler = MockMessageHandler::new(true);
+        const MAX_RETRIES: u32 = 3;
+
+        let result = timeout(
+            Duration::from_secs_f32(0.10), // Longer timeout for retries
+            RabbitMQConsumer::handle_with_retry(
+                &handler,
+                "test.topic",
+                b"test message",
+                MAX_RETRIES,
+            ),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let inner_result = result.unwrap();
+        assert!(inner_result.is_err());
+        match inner_result {
+            Err(RabbitMQError::MessageParseError(_)) => (),
+            _ => panic!("Expected MessageParseError"),
+        }
+
+        // Should have tried MAX_RETRIES times
+        assert_eq!(handler.get_failure_count().await, MAX_RETRIES as usize);
+    }
+
+    #[tokio::test]
+    async fn test_handle_with_retry_partial_failure() {
+        // Create a handler that will succeed after a few failures
         let handler = MockMessageHandler {
-            messages: messages.clone(),
+            messages: Arc::new(Mutex::new(vec![])),
+            should_fail: false,
+            failure_count: Arc::new(Mutex::new(0)),
         };
 
-        handler
-            .handle_message("sensors.temperature", b"25.5")
-            .await
-            .unwrap();
+        let result = timeout(
+            Duration::from_secs(5),
+            RabbitMQConsumer::handle_with_retry(&handler, "test.topic", b"test message", 3),
+        )
+        .await;
 
-        let received = messages.lock().await;
-        assert_eq!(received[0].0, "sensors.temperature");
-        assert_eq!(received[0].1, b"25.5");
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_ok());
+        assert!(handler.get_failure_count().await <= 3);
+
+        let messages = handler.get_messages().await;
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_sensor_message_handler() {
+        let handler = SensorMessageHandler;
+
+        // Test temperature message
+        let result = timeout(
+            Duration::from_secs_f32(0.1),
+            handler.handle_message("sensors.temperature", b"25.5"),
+        )
+        .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_ok());
+
+        // Test humidity message
+        let result = timeout(
+            Duration::from_secs_f32(0.1),
+            handler.handle_message("sensors.humidity", b"60"),
+        )
+        .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_ok());
+
+        // Test unknown sensor type
+        let result = timeout(
+            Duration::from_secs_f32(0.1),
+            handler.handle_message("sensors.unknown", b"data"),
+        )
+        .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_ok());
+
+        // Test invalid UTF-8
+        let result = timeout(
+            Duration::from_secs_f32(0.1),
+            handler.handle_message("sensors.temperature", &[0xFF]),
+        )
+        .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_err());
     }
 }
