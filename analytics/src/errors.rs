@@ -24,6 +24,9 @@ pub enum WebSocketError {
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[allow(unused)]
+    #[error("Custom error: {0}")]
+    Custom(String),
 }
 
 #[derive(Debug, Error)]
