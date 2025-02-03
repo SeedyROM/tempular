@@ -88,10 +88,14 @@ impl FromEnv for WebSocketConfig {
             }),
             port: env::var("WS_PORT")
                 .map(|port| port.parse().unwrap_or(default.port))
-                .unwrap_or({
-                    warn!("WS_PORT not set or invalid, defaulting to {}", default.port);
+                .map_err(|e| {
+                    warn!(
+                        "WS_PORT not set or invalid, defaulting to {}: {}",
+                        default.port, e
+                    );
                     default.port
-                }),
+                })
+                .unwrap(),
         }
     }
 }
