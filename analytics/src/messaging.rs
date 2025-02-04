@@ -27,6 +27,7 @@ impl<T: Clone> Message<T> {
     }
 }
 
+#[derive(Default)]
 pub struct MessageRouter<T: Clone> {
     subscribers: Arc<Mutex<HashMap<String, Vec<Sender<Message<T>>>>>>,
 }

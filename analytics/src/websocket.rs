@@ -1,11 +1,16 @@
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
-use std::net::SocketAddr;
-use tokio::sync::broadcast;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    sync::Arc,
+};
+use tokio::sync::{broadcast, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
-use crate::errors::WebSocketError;
+use crate::{errors::WebSocketError, messaging::MessageRouter};
 
 // Enhanced trait that defines WebSocket server behavior with connection state
 #[async_trait::async_trait]
@@ -14,13 +19,21 @@ pub trait WebSocketHandler: Send + Sync + Clone + 'static {
     type ConnectionState: Send + Default + 'static;
 
     /// Called when a new connection is established
-    async fn on_connect(&self, addr: SocketAddr) -> Result<(), WebSocketError> {
+    async fn on_connect(
+        &self,
+        _state: &mut Self::ConnectionState,
+        addr: SocketAddr,
+    ) -> Result<(), WebSocketError> {
         debug!("New connection from {}", addr);
         Ok(())
     }
 
     /// Called when a connection is closed
-    async fn on_disconnect(&self, addr: SocketAddr) -> Result<(), WebSocketError> {
+    async fn on_disconnect(
+        &self,
+        _state: &mut Self::ConnectionState,
+        addr: SocketAddr,
+    ) -> Result<(), WebSocketError> {
         debug!("Connection closed from {}", addr);
         Ok(())
     }
@@ -70,7 +83,7 @@ impl<H: WebSocketHandler> WebSocketServer<H> {
         let mut connection_state = H::ConnectionState::default();
 
         // Notify handler of new connection
-        handler.on_connect(peer).await?;
+        handler.on_connect(&mut connection_state, peer).await?;
 
         // Process messages as they arrive
         while let Some(msg_result) = ws_receiver.next().await {
@@ -104,7 +117,7 @@ impl<H: WebSocketHandler> WebSocketServer<H> {
         }
 
         // Notify handler of disconnection
-        handler.on_disconnect(peer).await?;
+        handler.on_disconnect(&mut connection_state, peer).await?;
 
         Ok(())
     }
@@ -143,20 +156,70 @@ impl<H: WebSocketHandler> WebSocketServer<H> {
 
 // Enhanced echo handler implementation
 #[derive(Clone, Debug)]
-pub struct EchoHandler;
+pub struct PubSubHandler;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum PubSubData {
+    #[serde(rename = "subscribe")]
+    Subscribe { topics: Vec<String> },
+    #[serde(rename = "unsubscribe")]
+    Unsubscribe { topics: Vec<String> },
+    #[serde(rename = "data_point")]
+    DataPoint {
+        timestamp: u64,
+        sensor_id: String,
+        value: f64,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PubSubMessage {
+    #[serde(flatten)]
+    data: PubSubData,
+}
+
+struct Connection {
+    subscribed_topics: HashSet<String>,
+}
 
 // Simple connection state example
-#[derive(Default)]
-pub struct EchoConnectionState {
+pub struct PubSubConnectionState {
+    router: MessageRouter<PubSubMessage>,
     messages_received: usize,
+    connections: Arc<Mutex<HashMap<SocketAddr, Connection>>>,
+}
+
+impl Default for PubSubConnectionState {
+    fn default() -> Self {
+        Self {
+            router: MessageRouter::new(),
+            messages_received: 0,
+            connections: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
 }
 
 #[async_trait::async_trait]
-impl WebSocketHandler for EchoHandler {
-    type ConnectionState = EchoConnectionState;
+impl WebSocketHandler for PubSubHandler {
+    type ConnectionState = PubSubConnectionState;
 
-    async fn on_connect(&self, addr: SocketAddr) -> Result<(), WebSocketError> {
-        info!("New echo connection from {}", addr);
+    async fn on_connect(
+        &self,
+        state: &mut Self::ConnectionState,
+        addr: SocketAddr,
+    ) -> Result<(), WebSocketError> {
+        info!("New connection from {}", addr);
+
+        {
+            let mut connections = state.connections.lock().await;
+            connections.insert(
+                addr,
+                Connection {
+                    subscribed_topics: HashSet::new(),
+                },
+            );
+        }
+
         Ok(())
     }
 
@@ -168,11 +231,72 @@ impl WebSocketHandler for EchoHandler {
     ) -> Result<Vec<Message>, WebSocketError> {
         state.messages_received += 1;
         debug!("Handling message {} from {}", state.messages_received, addr);
-        Ok(vec![message]) // Echo back the message
+
+        let message = match message {
+            Message::Text(text) => Message::Text(text),
+            Message::Binary(bin) => Message::Binary(bin),
+            _ => {
+                warn!("Unsupported message type from {}", addr);
+                return Ok(vec![]);
+            }
+        };
+
+        let message_str = message
+            .to_text()
+            .map_err(|e| WebSocketError::WebSocket(e.into()))?;
+
+        debug!("Received message from {}: {}", addr, message_str);
+
+        let message: PubSubMessage = match serde_json::from_str(message_str) {
+            Ok(msg) => msg,
+            Err(e) => {
+                warn!("Failed to parse message from {}: {}", addr, e);
+                return Ok(vec![]);
+            }
+        };
+
+        // Process the message
+        match &message.data {
+            PubSubData::Subscribe { topics } => {
+                let mut connections = state.connections.lock().await;
+                if let Some(connection) = connections.get_mut(&addr) {
+                    for topic in topics {
+                        connection.subscribed_topics.insert(topic.clone());
+                    }
+                }
+            }
+            PubSubData::Unsubscribe { topics } => {
+                let mut connections = state.connections.lock().await;
+                if let Some(connection) = connections.get_mut(&addr) {
+                    for topic in topics {
+                        connection.subscribed_topics.remove(topic);
+                    }
+                }
+            }
+            _ => {
+                info!("Unsupported message type from {}", addr);
+            }
+        }
+
+        // Echo back the message
+        let response =
+            serde_json::to_string(&message).map_err(|e| WebSocketError::Serde(e.into()))?;
+
+        Ok(vec![Message::Text(response.into())]) // Echo back the message
     }
 
-    async fn on_disconnect(&self, addr: SocketAddr) -> Result<(), WebSocketError> {
-        info!("Echo connection closed from {}", addr);
+    async fn on_disconnect(
+        &self,
+        state: &mut Self::ConnectionState,
+        addr: SocketAddr,
+    ) -> Result<(), WebSocketError> {
+        info!("Connection closed from {}", addr);
+
+        {
+            let mut connections = state.connections.lock().await;
+            connections.remove(&addr);
+        }
+
         Ok(())
     }
 }
@@ -182,7 +306,7 @@ pub async fn server(shutdown_rx: broadcast::Receiver<()>) -> Result<(), WebSocke
     use crate::{config::WebSocketConfig, traits::FromEnv};
 
     let WebSocketConfig { host, port } = WebSocketConfig::from_env();
-    let handler = EchoHandler;
+    let handler = PubSubHandler;
 
     let server = WebSocketServer::new(host.into(), port, handler).await?;
     server.start(shutdown_rx).await
@@ -191,6 +315,8 @@ pub async fn server(shutdown_rx: broadcast::Receiver<()>) -> Result<(), WebSocke
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use serde_json::json;
     use std::time::Duration;
 
     // Enhanced mock handler with connection state
@@ -258,14 +384,22 @@ mod tests {
         impl WebSocketHandler for LifecycleHandler {
             type ConnectionState = LifecycleState;
 
-            async fn on_connect(&self, _addr: SocketAddr) -> Result<(), WebSocketError> {
+            async fn on_connect(
+                &self,
+                _state: &mut Self::ConnectionState,
+                _addr: SocketAddr,
+            ) -> Result<(), WebSocketError> {
                 self.tracker
                     .connects
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
             }
 
-            async fn on_disconnect(&self, _addr: SocketAddr) -> Result<(), WebSocketError> {
+            async fn on_disconnect(
+                &self,
+                _state: &mut Self::ConnectionState,
+                _addr: SocketAddr,
+            ) -> Result<(), WebSocketError> {
                 self.tracker
                     .disconnects
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -407,7 +541,11 @@ mod tests {
         impl WebSocketHandler for ConcurrentHandler {
             type ConnectionState = ConcurrentState;
 
-            async fn on_connect(&self, _addr: SocketAddr) -> Result<(), WebSocketError> {
+            async fn on_connect(
+                &self,
+                _state: &mut Self::ConnectionState,
+                _addr: SocketAddr,
+            ) -> Result<(), WebSocketError> {
                 let active = self
                     .tracker
                     .active_connections
@@ -435,7 +573,11 @@ mod tests {
                 Ok(())
             }
 
-            async fn on_disconnect(&self, _addr: SocketAddr) -> Result<(), WebSocketError> {
+            async fn on_disconnect(
+                &self,
+                _state: &mut Self::ConnectionState,
+                _addr: SocketAddr,
+            ) -> Result<(), WebSocketError> {
                 self.tracker
                     .active_connections
                     .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
@@ -576,5 +718,168 @@ mod tests {
         server_handle.await??;
 
         Ok(())
+    }
+
+    async fn setup_server() -> (
+        SocketAddr,
+        broadcast::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let handler = PubSubHandler;
+        let server = WebSocketServer::new("127.0.0.1".into(), 0, handler)
+            .await
+            .unwrap();
+        let addr = server.tcp_listener.local_addr().unwrap();
+
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+
+        let handle = tokio::spawn(async move {
+            let _ = server.start(shutdown_rx).await;
+        });
+
+        (addr, shutdown_tx, handle)
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_unsubscribe() {
+        let (addr, shutdown_tx, handle) = setup_server().await;
+
+        let (mut ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+            .await
+            .expect("Failed to connect");
+
+        let subscribe_msg = json!({
+            "subscribe": {
+                "topics": ["test-topic"]
+            }
+        })
+        .to_string();
+
+        ws_stream
+            .send(Message::Text(subscribe_msg.into()))
+            .await
+            .unwrap();
+
+        if let Some(Ok(response)) =
+            tokio::time::timeout(Duration::from_secs_f32(0.1), ws_stream.next())
+                .await
+                .unwrap()
+        {
+            let resp_text = response.to_text().unwrap();
+            let parsed: PubSubMessage = serde_json::from_str(resp_text).unwrap();
+            match parsed.data {
+                PubSubData::Subscribe { topics } => {
+                    assert_eq!(topics, vec!["test-topic"]);
+                }
+                _ => panic!("Expected subscribe response"),
+            }
+        }
+
+        let unsubscribe_msg = json!({
+            "unsubscribe": {
+                "topics": ["test-topic"]
+            }
+        })
+        .to_string();
+
+        ws_stream
+            .send(Message::Text(unsubscribe_msg.into()))
+            .await
+            .unwrap();
+
+        drop(ws_stream);
+        shutdown_tx.send(()).unwrap();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_data_point_handling() {
+        let (addr, shutdown_tx, handle) = setup_server().await;
+
+        let (mut ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+            .await
+            .expect("Failed to connect");
+
+        let data_point_msg = json!({
+            "data_point": {
+                "timestamp": 1234567890,
+                "sensor_id": "sensor1",
+                "value": 42.5
+            }
+        })
+        .to_string();
+
+        ws_stream
+            .send(Message::Text(data_point_msg.into()))
+            .await
+            .unwrap();
+
+        if let Some(Ok(response)) =
+            tokio::time::timeout(Duration::from_secs_f32(0.1), ws_stream.next())
+                .await
+                .unwrap()
+        {
+            let resp_text = response.to_text().unwrap();
+            let parsed: PubSubMessage = serde_json::from_str(resp_text).unwrap();
+            match parsed.data {
+                PubSubData::DataPoint {
+                    timestamp,
+                    sensor_id,
+                    value,
+                } => {
+                    assert_eq!(timestamp, 1234567890);
+                    assert_eq!(sensor_id, "sensor1");
+                    assert_eq!(value, 42.5);
+                }
+                _ => panic!("Expected data point response"),
+            }
+        }
+
+        drop(ws_stream);
+        shutdown_tx.send(()).unwrap();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_multiple_topics() {
+        let (addr, shutdown_tx, handle) = setup_server().await;
+
+        let (mut ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://{}", addr))
+            .await
+            .expect("Failed to connect");
+
+        let subscribe_msg = json!({
+            "subscribe": {
+                "topics": ["topic1", "topic2", "topic3"]
+            }
+        })
+        .to_string();
+
+        ws_stream
+            .send(Message::Text(subscribe_msg.into()))
+            .await
+            .unwrap();
+
+        if let Some(Ok(response)) =
+            tokio::time::timeout(Duration::from_secs_f32(0.1), ws_stream.next())
+                .await
+                .unwrap()
+        {
+            let resp_text = response.to_text().unwrap();
+            let parsed: PubSubMessage = serde_json::from_str(resp_text).unwrap();
+            match parsed.data {
+                PubSubData::Subscribe { topics } => {
+                    assert_eq!(topics.len(), 3);
+                    assert!(topics.contains(&"topic1".to_string()));
+                    assert!(topics.contains(&"topic2".to_string()));
+                    assert!(topics.contains(&"topic3".to_string()));
+                }
+                _ => panic!("Expected subscribe response"),
+            }
+        }
+
+        drop(ws_stream);
+        shutdown_tx.send(()).unwrap();
+        let _ = handle.await;
     }
 }

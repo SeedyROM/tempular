@@ -27,6 +27,8 @@ pub enum WebSocketError {
     #[allow(unused)]
     #[error("Custom error: {0}")]
     Custom(String),
+    #[error("Serde error: {0}")]
+    Serde(#[from] serde_json::Error),
 }
 
 #[derive(Debug, Error)]
