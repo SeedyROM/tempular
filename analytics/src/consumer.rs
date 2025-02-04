@@ -1,3 +1,15 @@
+//! RabbitMQ Consumer Implementation
+//!
+//! This module provides a robust RabbitMQ consumer implementation with support for:
+//! - Dead Letter Queues (DLQ)
+//! - Message retry handling
+//! - Topic-based routing
+//! - Graceful shutdown
+//! - Custom message handlers
+//!
+//! The implementation follows RabbitMQ best practices for reliable message processing
+//! and error handling.
+
 use std::time::Duration;
 
 use anyhow::Result;
@@ -12,11 +24,70 @@ use tracing::{error, info};
 
 use crate::{config::RabbitMQConfig, errors::RabbitMQError};
 
+/// Defines the behavior for handling messages received from RabbitMQ.
+///
+/// Implementors of this trait can define custom logic for processing messages
+/// from specific topics. The implementation should be idempotent as messages
+/// may be retried multiple times in case of failures.
+///
+/// # Examples
+///
+/// ```rust
+/// use async_trait::async_trait;
+///
+/// struct MyHandler;
+///
+/// #[async_trait]
+/// impl MessageHandler for MyHandler {
+///     async fn handle_message(&self, topic: &str, payload: &[u8]) -> Result<(), RabbitMQError> {
+///         match topic {
+///             "sensors.temperature" => {
+///                 let temp = String::from_utf8(payload.to_vec())?;
+///                 println!("Temperature reading: {}", temp);
+///                 Ok(())
+///             }
+///             _ => Ok(())
+///         }
+///     }
+/// }
+/// ```
 #[async_trait]
 pub trait MessageHandler {
+    /// Processes a single message from RabbitMQ.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic` - The routing key/topic the message was published to
+    /// * `payload` - The raw message payload as bytes
+    ///
+    /// # Returns
+    ///
+    /// * `Result<(), RabbitMQError>` - Ok(()) if processing succeeded, Error if it failed
     async fn handle_message(&self, topic: &str, payload: &[u8]) -> Result<(), RabbitMQError>;
 }
 
+/// A RabbitMQ consumer that handles message processing with dead-letter support.
+///
+/// This consumer implementation includes:
+/// - Automatic setup of dead-letter exchanges and queues
+/// - Message retry logic with exponential backoff
+/// - Topic-based message routing
+/// - Graceful shutdown handling
+///
+/// # Examples
+///
+/// ```rust
+/// let config = RabbitMQConfig::new("amqp://localhost", "my_queue");
+/// let consumer = RabbitMQConsumer::new(&config).await?;
+///
+/// // Bind to specific topics
+/// consumer.bind_topic("sensors.#").await?;
+///
+/// // Start consuming with a custom handler
+/// let handler = SensorMessageHandler;
+/// let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+/// consumer.start_consuming(handler, shutdown_rx).await?;
+/// ```
 #[derive(Clone)]
 pub struct RabbitMQConsumer {
     channel: Channel,
@@ -27,6 +98,29 @@ pub struct RabbitMQConsumer {
 }
 
 impl RabbitMQConsumer {
+    /// Creates a new RabbitMQ consumer with dead-letter queue support.
+    ///
+    /// This method:
+    /// 1. Establishes a connection to RabbitMQ
+    /// 2. Creates a channel
+    /// 3. Sets up the dead-letter exchange (DLX)
+    /// 4. Creates the dead-letter queue (DLQ)
+    /// 5. Creates and configures the main queue
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - RabbitMQ configuration including connection URL and queue names
+    ///
+    /// # Returns
+    ///
+    /// * `Result<Self, RabbitMQError>` - The configured consumer or an error
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// let config = RabbitMQConfig::new("amqp://localhost", "my_queue");
+    /// let consumer = RabbitMQConsumer::new(&config).await?;
+    /// ```
     pub async fn new(config: &RabbitMQConfig) -> Result<Self, RabbitMQError> {
         let conn = Connection::connect(&config.url(), ConnectionProperties::default()).await?;
         let channel = conn.create_channel().await?;
@@ -105,6 +199,28 @@ impl RabbitMQConsumer {
         })
     }
 
+    /// Binds the consumer's queue to a specific routing key/topic.
+    ///
+    /// Messages published to the "amq.topic" exchange with matching routing keys
+    /// will be delivered to this consumer's queue.
+    ///
+    /// # Arguments
+    ///
+    /// * `routing_key` - The routing key pattern to bind to (supports RabbitMQ wildcards)
+    ///
+    /// # Returns
+    ///
+    /// * `Result<(), RabbitMQError>` - Ok(()) if binding succeeded, Error if it failed
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// // Bind to all sensor topics
+    /// consumer.bind_topic("sensors.#").await?;
+    ///
+    /// // Bind to specific sensor type
+    /// consumer.bind_topic("sensors.temperature.*").await?;
+    /// ```
     pub async fn bind_topic(&self, routing_key: &str) -> Result<(), RabbitMQError> {
         self.channel
             .queue_bind(
@@ -120,6 +236,17 @@ impl RabbitMQConsumer {
         Ok(())
     }
 
+    /// Internal helper that implements retry logic for message handling.
+    ///
+    /// Attempts to process a message up to `max_retries` times with exponential backoff
+    /// between attempts. In non-test environments, the backoff period doubles with each retry.
+    ///
+    /// # Arguments
+    ///
+    /// * `handler` - The message handler implementation
+    /// * `topic` - The message's routing key/topic
+    /// * `payload` - The message payload
+    /// * `max_retries` - Maximum number of retry attempts
     async fn handle_with_retry<H: MessageHandler>(
         handler: &H,
         topic: &str,
@@ -145,6 +272,27 @@ impl RabbitMQConsumer {
         Ok(())
     }
 
+    /// Starts consuming messages from the queue.
+    ///
+    /// This method will:
+    /// 1. Establish a consumer with the RabbitMQ server
+    /// 2. Process incoming messages using the provided handler
+    /// 3. Implement retry logic for failed messages
+    /// 4. Move messages to the DLQ after max retries
+    /// 5. Handle graceful shutdown
+    ///
+    /// Messages are acknowledged (ACK) only after successful processing.
+    /// Failed messages (after retries) are negatively acknowledged (NACK)
+    /// and moved to the dead-letter queue.
+    ///
+    /// # Arguments
+    ///
+    /// * `handler` - Implementation of MessageHandler to process messages
+    /// * `shutdown` - Broadcast receiver for shutdown signaling
+    ///
+    /// # Returns
+    ///
+    /// * `Result<(), RabbitMQError>` - Ok(()) on graceful shutdown, Error on failure
     pub async fn start_consuming<H: MessageHandler>(
         &self,
         handler: H,
@@ -215,6 +363,20 @@ impl RabbitMQConsumer {
         Ok(())
     }
 
+    /// Starts consuming messages from the dead-letter queue (DLQ).
+    ///
+    /// This consumer provides a way to process messages that failed normal processing
+    /// and were moved to the DLQ. It can implement special handling logic for
+    /// failed messages or retry them with different parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `handler` - Implementation of MessageHandler to process DLQ messages
+    /// * `shutdown` - Broadcast receiver for shutdown signaling
+    ///
+    /// # Returns
+    ///
+    /// * `Result<(), RabbitMQError>` - Ok(()) on graceful shutdown, Error on failure
     pub async fn consume_dlq<H: MessageHandler>(
         &self,
         handler: H,
@@ -284,6 +446,22 @@ impl RabbitMQConsumer {
     }
 }
 
+/// A message handler implementation for sensor data.
+///
+/// This handler processes messages from different sensor topics:
+/// - Temperature readings
+/// - Humidity readings
+/// - Other sensor types
+///
+/// Messages are expected to be UTF-8 encoded strings containing
+/// sensor readings or data points.
+///
+/// # Examples
+///
+/// ```rust
+/// let handler = SensorMessageHandler;
+/// consumer.start_consuming(handler, shutdown_rx).await?;
+/// ```
 pub struct SensorMessageHandler;
 
 #[async_trait]

@@ -70,10 +70,26 @@ use crate::{errors::WebSocketError, messaging::MessageRouter};
 /// ```
 #[async_trait::async_trait]
 pub trait WebSocketHandler: Send + Sync + Clone + 'static {
-    /// Custom connection state that can be maintained across messages
+    /// Represents the connection-specific state that persists across messages for a single WebSocket connection.
+    ///
+    /// This associated type must implement:
+    /// - `Send`: Can be sent across thread boundaries
+    /// - `Default`: Provides initial state for new connections
+    /// - `'static`: Has no borrowed references
     type ConnectionState: Send + Default + 'static;
 
-    /// Called when a new connection is established
+    /// Called when a new WebSocket connection is established with a client.
+    ///
+    /// This method allows implementations to perform any necessary setup or initialization
+    /// for the new connection. The default implementation simply logs the connection.
+    ///
+    /// # Parameters
+    /// * `_state` - Mutable reference to the connection state, initialized with `Default::default()`
+    /// * `addr` - Socket address of the connected client
+    ///
+    /// # Returns
+    /// * `Ok(())` if connection handling was successful
+    /// * `Err(WebSocketError)` if an error occurred during connection handling
     async fn on_connect(
         &self,
         _state: &mut Self::ConnectionState,
@@ -83,7 +99,18 @@ pub trait WebSocketHandler: Send + Sync + Clone + 'static {
         Ok(())
     }
 
-    /// Called when a connection is closed
+    /// Called when an existing WebSocket connection is terminated.
+    ///
+    /// This method allows implementations to perform any necessary cleanup or bookkeeping
+    /// when a connection ends. The default implementation simply logs the disconnection.
+    ///
+    /// # Parameters
+    /// * `_state` - Mutable reference to the connection state for the closing connection
+    /// * `addr` - Socket address of the disconnecting client
+    ///
+    /// # Returns
+    /// * `Ok(())` if disconnection handling was successful
+    /// * `Err(WebSocketError)` if an error occurred during disconnect handling
     async fn on_disconnect(
         &self,
         _state: &mut Self::ConnectionState,
@@ -93,7 +120,21 @@ pub trait WebSocketHandler: Send + Sync + Clone + 'static {
         Ok(())
     }
 
-    /// Handle an individual message
+    /// Processes an individual WebSocket message received from a client.
+    ///
+    /// This is the main message handling method that implementations must provide. It receives
+    /// incoming messages, processes them according to the application's needs, and can respond
+    /// with zero or more messages to be sent back to the client.
+    ///
+    /// # Parameters
+    /// * `addr` - Socket address of the client that sent the message
+    /// * `state` - Mutable reference to the connection-specific state
+    /// * `message` - The received WebSocket message to be processed
+    ///
+    /// # Returns
+    /// * `Ok(Vec<Message>)` - A vector of messages to be sent back to the client. Can be empty
+    ///   if no response is needed
+    /// * `Err(WebSocketError)` - If an error occurred during message processing
     async fn handle_message(
         &self,
         addr: SocketAddr,

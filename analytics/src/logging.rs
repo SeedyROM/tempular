@@ -1,6 +1,7 @@
 use color_eyre::Report;
 use tracing_subscriber::EnvFilter;
 
+/// Setup the application's logging and error formatting.
 pub fn setup() -> Result<(), Report> {
     // Get / set backtrace
     if std::env::var("RUST_LIB_BACKTRACE").is_err() {
