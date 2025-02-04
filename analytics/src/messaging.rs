@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::fmt::Debug;
+use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::Mutex;
 
 /// A message that can be published through the message router.
 ///
@@ -49,7 +49,7 @@ impl<T: Clone> Message<T> {
 /// Messages are delivered asynchronously through tokio channels with a buffer size of 32 messages.
 #[derive(Default)]
 pub struct MessageRouter<T: Clone> {
-    subscribers: Arc<Mutex<HashMap<String, Vec<Sender<Message<T>>>>>>,
+    subscribers: Arc<DashMap<String, Vec<Sender<Message<T>>>>>,
 }
 
 impl<T: Clone> MessageRouter<T> {
@@ -59,7 +59,7 @@ impl<T: Clone> MessageRouter<T> {
     /// A new `MessageRouter<T>` instance with no subscribers.
     pub fn new() -> Self {
         Self {
-            subscribers: Arc::new(Mutex::new(HashMap::new())),
+            subscribers: Arc::new(DashMap::new()),
         }
     }
 
@@ -78,8 +78,10 @@ impl<T: Clone> MessageRouter<T> {
         let topic = topic.into();
         let (tx, rx) = mpsc::channel(32);
 
-        let mut subscribers = self.subscribers.lock().await;
-        subscribers.entry(topic).or_insert_with(Vec::new).push(tx);
+        self.subscribers
+            .entry(topic)
+            .or_insert_with(Vec::new)
+            .push(tx);
 
         rx
     }
@@ -95,10 +97,8 @@ impl<T: Clone> MessageRouter<T> {
     /// # Parameters
     /// * `message` - The message to publish
     pub async fn publish(&self, message: Message<T>) {
-        let subscribers = self.subscribers.lock().await;
-
-        if let Some(topic_subscribers) = subscribers.get(&message.topic) {
-            for subscriber in topic_subscribers {
+        if let Some(topic_subscribers) = self.subscribers.get(&message.topic) {
+            for subscriber in topic_subscribers.deref() {
                 let _ = subscriber.send(message.clone()).await;
             }
         }
@@ -111,9 +111,7 @@ impl<T: Clone> MessageRouter<T> {
     /// - Removes all closed sender channels from topic subscriber lists
     /// - Removes any topics that no longer have any subscribers
     pub async fn cleanup(&self) {
-        let mut subscribers = self.subscribers.lock().await;
-
-        subscribers.retain(|_, senders| {
+        self.subscribers.retain(|_, senders| {
             senders.retain(|sender| !sender.is_closed());
             !senders.is_empty()
         });
@@ -130,8 +128,7 @@ impl<T: Clone> MessageRouter<T> {
     /// The number of subscribers currently registered for the topic
     #[cfg(test)]
     async fn subscriber_count(&self, topic: &str) -> usize {
-        let subscribers = self.subscribers.lock().await;
-        subscribers.get(topic).map_or(0, |v| v.len())
+        self.subscribers.get(topic).map_or(0, |v| v.len())
     }
 }
 

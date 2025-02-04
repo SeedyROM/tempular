@@ -425,7 +425,7 @@ impl WebSocketHandler for PubSubHandler {
                 }
             }
             _ => {
-                info!("Unsupported message type from {}", addr);
+                warn!("Unsupported message type from {}", addr);
             }
         }
 
