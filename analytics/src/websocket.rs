@@ -1,3 +1,18 @@
+//! WebSocket Server Implementation with Pub/Sub Support
+//!
+//! This module provides a flexible WebSocket server implementation with built-in support
+//! for publish/subscribe patterns. It features:
+//! - Custom connection state management per client
+//! - Asynchronous message handling
+//! - Connection lifecycle management
+//! - Generic message routing capabilities
+//! - Built-in pub/sub functionality
+//!
+//! # Architecture
+//! The implementation is based on a trait-based design where the core functionality
+//! is defined by the `WebSocketHandler` trait, allowing for custom implementations
+//! while providing a default pub/sub handler.
+
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -12,7 +27,47 @@ use tracing::{debug, error, info, warn};
 
 use crate::{errors::WebSocketError, messaging::MessageRouter};
 
-// Enhanced trait that defines WebSocket server behavior with connection state
+/// Defines the behavior for handling WebSocket connections and messages.
+///
+/// This trait provides the core interface for implementing custom WebSocket server behavior.
+/// Implementors can define their own connection state type and provide custom logic for
+/// connection lifecycle events and message handling.
+///
+/// # Type Parameters
+///
+/// * `ConnectionState`: A type that represents the state maintained for each connection.
+///   Must implement `Send + Default + 'static`.
+///
+/// # Examples
+///
+/// ```rust
+/// # use async_trait::async_trait;
+/// # use tokio_tungstenite::tungstenite::Message;
+/// # use std::net::SocketAddr;
+///
+/// #[derive(Default)]
+/// struct MyState {
+///     message_count: usize,
+/// }
+///
+/// #[derive(Clone)]
+/// struct MyHandler;
+///
+/// #[async_trait]
+/// impl WebSocketHandler for MyHandler {
+///     type ConnectionState = MyState;
+///     
+///     async fn handle_message(
+///         &self,
+///         addr: SocketAddr,
+///         state: &mut MyState,
+///         message: Message,
+///     ) -> Result<Vec<Message>, WebSocketError> {
+///         state.message_count += 1;
+///         Ok(vec![Message::Text(format!("Received message #{}", state.message_count))])
+///     }
+/// }
+/// ```
 #[async_trait::async_trait]
 pub trait WebSocketHandler: Send + Sync + Clone + 'static {
     /// Custom connection state that can be maintained across messages
@@ -47,7 +102,13 @@ pub trait WebSocketHandler: Send + Sync + Clone + 'static {
     ) -> Result<Vec<Message>, WebSocketError>;
 }
 
-// Real implementation that uses actual TCP/WebSocket
+/// A WebSocket server implementation that can run any handler.
+///
+/// # Type Parameters
+///
+/// * `H`: A type that implements `WebSocketHandler`, defining how the server handles
+///   connections and messages.
+/// ```
 #[derive(Debug)]
 pub struct WebSocketServer<H: WebSocketHandler> {
     handler: H,
@@ -154,10 +215,50 @@ impl<H: WebSocketHandler> WebSocketServer<H> {
     }
 }
 
-// Enhanced echo handler implementation
+/// A publish/subscribe handler implementation for the WebSocket server.
+///
+/// This handler provides functionality for:
+/// - Topic subscription management
+/// - Message broadcasting to subscribed clients
+/// - Data point distribution
+///
+/// # Message Types
+///
+/// The handler supports three types of messages:
+/// - Subscribe: Add subscriptions to specific topics
+/// - Unsubscribe: Remove subscriptions from specific topics
+/// - DataPoint: Send sensor data to subscribed clients
+///
+/// # Examples
+///
+/// ```rust
+/// let handler = PubSubHandler;
+/// let server = WebSocketServer::new("127.0.0.1".to_string(), 8080, handler).await?;
+/// ```
 #[derive(Clone, Debug)]
 pub struct PubSubHandler;
 
+/// Represents the types of messages that can be sent in the pub/sub system.
+///
+/// # Variants
+///
+/// * `Subscribe`: Request to subscribe to one or more topics
+/// * `Unsubscribe`: Request to unsubscribe from one or more topics
+/// * `DataPoint`: A data point message containing sensor information
+///
+/// # Examples
+///
+/// ```rust
+/// let subscribe_msg = PubSubData::Subscribe {
+///     topics: vec!["sensors".to_string(), "alerts".to_string()]
+/// };
+///
+/// let data_point = PubSubData::DataPoint {
+///     timestamp: 1234567890,
+///     sensor_id: "temp_sensor_1".to_string(),
+///     value: 23.5
+/// };
+/// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PubSubData {
     #[serde(rename = "subscribe")]
@@ -182,8 +283,17 @@ struct Connection {
     subscribed_topics: HashSet<String>,
 }
 
-// Simple connection state example
+/// State maintained for each connection in the pub/sub system.
+///
+/// This struct tracks per-connection information including:
+/// - Message statistics
+/// - Active topic subscriptions
+/// - Reference to the message router
+///
+/// The state is automatically initialized when a new connection is established
+/// and cleaned up when the connection is closed.
 pub struct PubSubConnectionState {
+    #[allow(unused)]
     router: MessageRouter<PubSubMessage>,
     messages_received: usize,
     connections: Arc<Mutex<HashMap<SocketAddr, Connection>>>,
@@ -301,7 +411,37 @@ impl WebSocketHandler for PubSubHandler {
     }
 }
 
-/// Starts the WebSocket server with default configuration
+/// Starts a WebSocket server with the default configuration.
+///
+/// This function:
+/// 1. Loads configuration from environment variables
+/// 2. Creates a new PubSubHandler instance
+/// 3. Initializes and starts the WebSocket server
+///
+/// # Arguments
+///
+/// * `shutdown_rx`: A broadcast receiver for graceful shutdown signaling
+///
+/// # Returns
+///
+/// * `Result<(), WebSocketError>`: Ok(()) on successful shutdown, or an error
+///   if something goes wrong during server operation
+///
+/// # Examples
+///
+/// ```rust
+/// let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+///
+/// // Start the server
+/// tokio::spawn(async move {
+///     if let Err(e) = server(shutdown_rx).await {
+///         eprintln!("Server error: {}", e);
+///     }
+/// });
+///
+/// // Later, initiate graceful shutdown
+/// shutdown_tx.send(()).expect("Failed to send shutdown signal");
+/// ```
 pub async fn server(shutdown_rx: broadcast::Receiver<()>) -> Result<(), WebSocketError> {
     use crate::{config::WebSocketConfig, traits::FromEnv};
 
