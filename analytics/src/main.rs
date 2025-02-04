@@ -1,9 +1,8 @@
 use anyhow::Result;
 use color_eyre::Report;
-use config::RabbitMQConfig;
+use config::AppConfig;
 use errors::EnvironmentError;
 use tracing::info;
-use traits::FromEnv;
 
 mod config;
 mod consumer;
@@ -11,7 +10,6 @@ mod errors;
 mod logging;
 mod messaging;
 mod shutdown;
-mod traits;
 mod websocket;
 
 use crate::consumer::{RabbitMQConsumer, SensorMessageHandler};
@@ -21,9 +19,10 @@ async fn main() -> Result<(), Report> {
     // Setup the application
     setup()?;
 
-    // Setup the RabbitMQ consumer
-    let config = RabbitMQConfig::from_env();
-    let consumer = RabbitMQConsumer::new(&config).await?;
+    // Load configuration
+    let config = AppConfig::new()?;
+
+    let consumer = RabbitMQConsumer::new(&config.rabbitmq).await?;
     consumer.bind_topic("sensors.#").await?;
 
     // Setup shutdown signals
@@ -51,7 +50,7 @@ async fn main() -> Result<(), Report> {
     // Start WebSocket server
     let websocket_handle = tokio::spawn({
         let shutdown_rx = shutdown_tx.subscribe();
-        websocket::server(shutdown_rx)
+        websocket::server(config.websocket, shutdown_rx)
     });
 
     // Setup signal handlers

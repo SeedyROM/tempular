@@ -4,6 +4,9 @@ use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
+/// Max number of messages to buffer in a channel.
+pub const CHANNEL_BUFFER_SIZE: usize = 2048;
+
 /// A message that can be published through the message router.
 ///
 /// Contains a topic string that determines which subscribers receive the message,
@@ -76,7 +79,7 @@ impl<T: Clone> MessageRouter<T> {
     /// A `Receiver<Message<T>>` that will receive messages published to the topic
     pub async fn subscribe(&self, topic: impl Into<String>) -> Receiver<Message<T>> {
         let topic = topic.into();
-        let (tx, rx) = mpsc::channel(32);
+        let (tx, rx) = mpsc::channel(CHANNEL_BUFFER_SIZE);
 
         self.subscribers
             .entry(topic)

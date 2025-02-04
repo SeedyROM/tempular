@@ -22,7 +22,7 @@ use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
-use crate::{errors::WebSocketError, messaging::MessageRouter};
+use crate::{config::WebSocketConfig, errors::WebSocketError, messaging::MessageRouter};
 
 /// Defines the behavior for handling WebSocket connections and messages.
 ///
@@ -441,15 +441,16 @@ impl WebSocketHandler for PubSubHandler {
     }
 }
 
-/// Starts a WebSocket server with the default configuration.
+/// Starts a specialized WebSocket server with pub/sub capabilities.
 ///
 /// This function:
-/// 1. Loads configuration from environment variables
+/// 1. Loads configuration from the given `WebSocketConfig`
 /// 2. Creates a new PubSubHandler instance
 /// 3. Initializes and starts the WebSocket server
 ///
 /// # Arguments
 ///
+/// * `config`: Configuration for the WebSocket server
 /// * `shutdown_rx`: A broadcast receiver for graceful shutdown signaling
 ///
 /// # Returns
@@ -472,13 +473,12 @@ impl WebSocketHandler for PubSubHandler {
 /// // Later, initiate graceful shutdown
 /// shutdown_tx.send(()).expect("Failed to send shutdown signal");
 /// ```
-pub async fn server(shutdown_rx: broadcast::Receiver<()>) -> Result<(), WebSocketError> {
-    use crate::{config::WebSocketConfig, traits::FromEnv};
-
-    let WebSocketConfig { host, port } = WebSocketConfig::from_env();
+pub async fn server(
+    config: WebSocketConfig,
+    shutdown_rx: broadcast::Receiver<()>,
+) -> Result<(), WebSocketError> {
     let handler = PubSubHandler;
-
-    let server = WebSocketServer::new(host.into(), port, handler).await?;
+    let server = WebSocketServer::new(config.host, config.port, handler).await?;
     server.start(shutdown_rx).await
 }
 
