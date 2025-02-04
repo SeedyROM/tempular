@@ -14,14 +14,11 @@
 //! while providing a default pub/sub handler.
 
 use anyhow::Result;
+use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet},
-    net::SocketAddr,
-    sync::Arc,
-};
-use tokio::sync::{broadcast, Mutex};
+use std::{collections::HashSet, net::SocketAddr, sync::Arc};
+use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
@@ -337,7 +334,7 @@ pub struct PubSubConnectionState {
     #[allow(unused)]
     router: MessageRouter<PubSubMessage>,
     messages_received: usize,
-    connections: Arc<Mutex<HashMap<SocketAddr, Connection>>>,
+    connections: Arc<DashMap<SocketAddr, Connection>>,
 }
 
 impl Default for PubSubConnectionState {
@@ -345,7 +342,7 @@ impl Default for PubSubConnectionState {
         Self {
             router: MessageRouter::new(),
             messages_received: 0,
-            connections: Arc::new(Mutex::new(HashMap::new())),
+            connections: Arc::new(DashMap::new()),
         }
     }
 }
@@ -361,15 +358,12 @@ impl WebSocketHandler for PubSubHandler {
     ) -> Result<(), WebSocketError> {
         info!("New connection from {}", addr);
 
-        {
-            let mut connections = state.connections.lock().await;
-            connections.insert(
-                addr,
-                Connection {
-                    subscribed_topics: HashSet::new(),
-                },
-            );
-        }
+        state.connections.insert(
+            addr,
+            Connection {
+                subscribed_topics: HashSet::new(),
+            },
+        );
 
         Ok(())
     }
@@ -409,16 +403,14 @@ impl WebSocketHandler for PubSubHandler {
         // Process the message
         match &message.data {
             PubSubData::Subscribe { topics } => {
-                let mut connections = state.connections.lock().await;
-                if let Some(connection) = connections.get_mut(&addr) {
+                if let Some(mut connection) = state.connections.get_mut(&addr) {
                     for topic in topics {
                         connection.subscribed_topics.insert(topic.clone());
                     }
                 }
             }
             PubSubData::Unsubscribe { topics } => {
-                let mut connections = state.connections.lock().await;
-                if let Some(connection) = connections.get_mut(&addr) {
+                if let Some(mut connection) = state.connections.get_mut(&addr) {
                     for topic in topics {
                         connection.subscribed_topics.remove(topic);
                     }
@@ -443,10 +435,7 @@ impl WebSocketHandler for PubSubHandler {
     ) -> Result<(), WebSocketError> {
         info!("Connection closed from {}", addr);
 
-        {
-            let mut connections = state.connections.lock().await;
-            connections.remove(&addr);
-        }
+        state.connections.remove(&addr);
 
         Ok(())
     }
