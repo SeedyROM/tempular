@@ -81,10 +81,7 @@ impl<T: Clone> MessageRouter<T> {
         let topic = topic.into();
         let (tx, rx) = mpsc::channel(CHANNEL_BUFFER_SIZE);
 
-        self.subscribers
-            .entry(topic)
-            .or_insert_with(Vec::new)
-            .push(tx);
+        self.subscribers.entry(topic).or_default().push(tx);
 
         rx
     }

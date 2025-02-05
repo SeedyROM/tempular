@@ -156,7 +156,7 @@ impl RabbitMQConsumer {
         // Bind DLQ to DLX
         channel
             .queue_bind(
-                &dlq_name.as_str(),
+                dlq_name.as_str(),
                 dlx_name.as_str(),
                 "dead-letter",
                 QueueBindOptions::default(),

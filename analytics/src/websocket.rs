@@ -157,7 +157,7 @@ impl<H: WebSocketHandler> WebSocketServer<H> {
     pub async fn new(host: String, port: u16, handler: H) -> Result<Self, WebSocketError> {
         let tcp_listener = tokio::net::TcpListener::bind(format!("{}:{}", host, port))
             .await
-            .map_err(|e| WebSocketError::Io(e.into()))?;
+            .map_err(WebSocketError::Io)?;
 
         Ok(Self {
             tcp_listener,
@@ -173,7 +173,7 @@ impl<H: WebSocketHandler> WebSocketServer<H> {
         // Accept the WebSocket connection
         let ws_stream = tokio_tungstenite::accept_async(stream)
             .await
-            .map_err(|e| WebSocketError::WebSocket(e.into()))?;
+            .map_err(WebSocketError::WebSocket)?;
 
         // Split the WebSocket stream
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
@@ -198,7 +198,7 @@ impl<H: WebSocketHandler> WebSocketServer<H> {
                             for response in responses {
                                 if let Err(e) = ws_sender.send(response).await {
                                     error!("Failed to send message to {}: {}", peer, e);
-                                    return Err(WebSocketError::WebSocket(e.into()));
+                                    return Err(WebSocketError::WebSocket(e));
                                 }
                             }
                         }
@@ -225,10 +225,7 @@ impl<H: WebSocketHandler> WebSocketServer<H> {
         &self,
         mut shutdown_rx: broadcast::Receiver<()>,
     ) -> Result<(), WebSocketError> {
-        let addr = self
-            .tcp_listener
-            .local_addr()
-            .map_err(|e| WebSocketError::Io(e.into()))?;
+        let addr = self.tcp_listener.local_addr().map_err(WebSocketError::Io)?;
         info!("WebSocket server listening on {}", addr);
 
         loop {
@@ -386,9 +383,7 @@ impl WebSocketHandler for PubSubHandler {
             }
         };
 
-        let message_str = message
-            .to_text()
-            .map_err(|e| WebSocketError::WebSocket(e.into()))?;
+        let message_str = message.to_text().map_err(WebSocketError::WebSocket)?;
 
         debug!("Received message from {}: {}", addr, message_str);
 
@@ -422,8 +417,7 @@ impl WebSocketHandler for PubSubHandler {
         }
 
         // Echo back the message
-        let response =
-            serde_json::to_string(&message).map_err(|e| WebSocketError::Serde(e.into()))?;
+        let response = serde_json::to_string(&message).map_err(WebSocketError::Serde)?;
 
         Ok(vec![Message::Text(response.into())]) // Echo back the message
     }
