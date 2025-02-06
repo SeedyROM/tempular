@@ -4,6 +4,7 @@ use config::AppConfig;
 use errors::EnvironmentError;
 use tracing::info;
 
+mod analytics;
 mod config;
 mod consumer;
 mod errors;
