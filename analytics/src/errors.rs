@@ -33,7 +33,7 @@ pub enum ConfigError {
     /// This variant is automatically converted from `dotenv::Error` through the
     /// `From` trait implementation.
     #[error("DotEnv error: {0}")]
-    DotEnvError(#[from] dotenv::Error),
+    DotEnvError(#[from] dotenvy::Error),
 
     /// Indicates that a required environment variable was not found or could not be accessed.
     ///

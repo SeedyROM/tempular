@@ -68,6 +68,6 @@ async fn main() -> Result<(), Report> {
 }
 
 fn setup() -> Result<(), Report> {
-    dotenv::dotenv().map_err(|_| EnvironmentError::DotEnvNotFound)?;
+    dotenvy::dotenv().map_err(|_| EnvironmentError::DotEnvNotFound)?;
     logging::setup()
 }
