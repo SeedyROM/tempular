@@ -4,11 +4,13 @@ use config::AppConfig;
 use errors::EnvironmentError;
 use tracing::info;
 
+#[allow(unused)]
 mod analytics;
 mod config;
 mod consumer;
 mod errors;
 mod logging;
+#[allow(unused)]
 mod messaging;
 mod shutdown;
 mod websocket;
